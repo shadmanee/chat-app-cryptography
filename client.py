@@ -115,6 +115,7 @@ def listen_for_messages_from_server(client):
             add_message(f"[{username}] {content}")
             
         else:
+            print("git testing change")
             messagebox.showerror("Error", "Message recevied from client is empty")
 
 #Main
