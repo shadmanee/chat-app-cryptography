@@ -47,7 +47,7 @@ def connect():
     port = int(port_entry.get())
     
     if role == "Server":
-        sock.bind(("0.0.0.0", port))
+        sock.bind(("192.168.5.240", port))
         sock.listen(1)
         status_label.config(text="Waiting for client...")
         conn, addr = sock.accept()
