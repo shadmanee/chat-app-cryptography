@@ -1,6 +1,6 @@
 # ─────────────────────────── server.py ────────────────────────────
 import socket, threading
-HOST, PORT = "0.0.0.0", 9999          # listen on every NIC
+HOST, PORT = "0.0.0.0", 9000          # listen on every NIC
 ENC = "utf-8"
 
 sockets   = {}   # { ip : socket }

@@ -12,7 +12,7 @@ class Chat:
         # ── top: connection parameters ───────────────────────────
         top = tk.Frame(self.root); top.pack(pady=4)
         self.server_ip = self._entry(top, "Server IP", 0, 0, 15)
-        self.port      = self._entry(top, "Port",      0, 2, 6, dflt="9999")
+        self.port      = self._entry(top, "Port",      0, 2, 6, dflt="9000")
         self.username  = self._entry(top, "Username",  1, 0, 15)
         self.target_ip = self._entry(top, "Target IP", 1, 2, 15)
         self.btn_conn  = tk.Button(top, text="Connect", width=10, command=self.connect)
