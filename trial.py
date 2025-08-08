@@ -110,6 +110,8 @@ def sign_message(self_private_key, message_bytes):
 def verify_signature(peer_public_pem, message_bytes, signature_bytes):
     public_key = serialization.load_pem_public_key(peer_public_pem)
     try:
+        print(message_bytes)
+        print(signature_bytes)
         public_key.verify(
             signature_bytes,
             message_bytes,
@@ -120,88 +122,7 @@ def verify_signature(peer_public_pem, message_bytes, signature_bytes):
     except Exception:
         return False
 
-
-
-# -------------------------
-# HYBRID: AES-GCM + RSA-OAEP
-# -------------------------
-# Blob format:
-#   2 bytes big-endian  : len_enc_key (L)
-#   L bytes             : enc_key (RSA-OAEP of AES key)
-#   12 bytes            : nonce (AES-GCM 96-bit)
-#   remaining bytes     : aes_ciphertext (ciphertext || tag)
-#
-# Using struct.pack(">H", len) for length prefix (max 65535, plenty).
-
-def hybrid_encrypt(plaintext_bytes, peer_public_pem):
-    # Generate AES-256 key and nonce
-    aes_key = AESGCM.generate_key(bit_length=256)
-    aesgcm = AESGCM(aes_key)
-    nonce = os.urandom(12)  # 96-bit nonce recommended for GCM
-    aes_ct = aesgcm.encrypt(nonce, plaintext_bytes, None)  # returns ciphertext||tag
-
-    # Encrypt AES key under peer's RSA public key
-    public_key = serialization.load_pem_public_key(peer_public_pem)
-    enc_key = public_key.encrypt(
-        aes_key,
-        asym_padding.OAEP(mgf=asym_padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
-    )
-
-    # Pack: 2-byte length + enc_key + nonce + aes_ct
-    blob = struct.pack(">H", len(enc_key)) + enc_key + nonce + aes_ct
-    return blob
-
-def hybrid_decrypt(blob_bytes, self_private_key):
-    if len(blob_bytes) < 2:
-        raise ValueError("blob too short")
-
-    # parse length
-    L = struct.unpack(">H", blob_bytes[:2])[0]
-    if len(blob_bytes) < 2 + L + 12:
-        raise ValueError("blob truncated")
-
-    enc_key = blob_bytes[2:2+L]
-    nonce = blob_bytes[2+L:2+L+12]
-    aes_ct = blob_bytes[2+L+12:]
-
-    # RSA-decrypt AES key
-    aes_key = self_private_key.decrypt(
-        enc_key,
-        asym_padding.OAEP(mgf=asym_padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
-    )
-
-    aesgcm = AESGCM(aes_key)
-    plaintext = aesgcm.decrypt(nonce, aes_ct, None)
-    return plaintext
-
-
-
-# 1. Generate AES 256-bit key
-def create_aes_key():
-    return os.urandom(32)  # 32 bytes = 256 bits
-
-# 2. Encrypt plaintext using AES-CBC
-def encrypt_aes(plaintext, key):
-    iv = os.urandom(16)  # AES block size is 16 bytes
-    padder = sym_padding.PKCS7(128).padder()  # Block size for PKCS7 is 128 bits
-    padded_data = padder.update(plaintext.encode()) + padder.finalize()
-
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-    encryptor = cipher.encryptor()
-    ciphertext = encryptor.update(padded_data) + encryptor.finalize()
-    
-    return iv + ciphertext  # prepend IV to ciphertext
-
-# 3. Decrypt ciphertext using AES-CBC
-def decrypt_aes(ciphertext_with_iv, key):
-    iv = ciphertext_with_iv[:16]
-    ciphertext = ciphertext_with_iv[16:]
-
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-    decryptor = cipher.decryptor()
-    padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-
-    unpadder = sym_padding.PKCS7(128).unpadder()
-    plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
-
-    return plaintext.decode()
+a=create_rsa_key_pairs()["private"]
+b=create_rsa_key_pairs()["public_pem"]
+c=sign_message(a,"hello".encode())
+print(verify_signature(b,"hello".encode(),c))
