@@ -122,16 +122,7 @@ def verify_signature(peer_public_pem, message_bytes, signature_bytes):
 
 
 
-# -------------------------
-# HYBRID: AES-GCM + RSA-OAEP
-# -------------------------
-# Blob format:
-#   2 bytes big-endian  : len_enc_key (L)
-#   L bytes             : enc_key (RSA-OAEP of AES key)
-#   12 bytes            : nonce (AES-GCM 96-bit)
-#   remaining bytes     : aes_ciphertext (ciphertext || tag)
-#
-# Using struct.pack(">H", len) for length prefix (max 65535, plenty).
+#HYBRID ENCRYPTION DECRYPTION USED IN CASE OF E(PUB, E(PR, M) )
 
 def hybrid_encrypt(plaintext_bytes, peer_public_pem):
     # Generate AES-256 key and nonce

@@ -1,27 +1,25 @@
 import argparse, socket, threading, sys, os
 from functions import *
 
-# --- Global State ---
-# Using a dictionary to hold state is cleaner than multiple global variables.
+# a dictionary of global variables.
 STATE = {
-    "self_private": None,      # Our own private key object
-    "self_public_pem": None,   # Our own public key in PEM format
-    "peer_public_pem": None,   # Our peer's public key in PEM format
-    "awaiting_key_response": False, # Flag to prevent key exchange loops
+    "self_private": None,      # own private key object
+    "self_public_pem": None,   # own public key in PEM format
+    "peer_public_pem": None,   # peer's public key in PEM format
+    "awaiting_key_response": False, # Flag to prevent RSA key exchange loops
 
-    "shared_key":None,
-    "self_nonce":None,
-    "await_init":False,
-    "await_send":False,
+    "shared_key":None,  # shared symmetric key object
+    "self_nonce":None,  # own nonce
+    "await_init":False, # Flag to prevent loop in 1st step of AES key exchange protocol
+    "await_send":False, # Flag to prevent loop in 2nd step of AES key exchange protocol
 }
 
-# A delimiter is crucial for message framing in a TCP stream.
-# It ensures we can separate one message from the next.
+# delimiter crucial for message framing in a TCP stream. It ensures we can separate one message from the next.
 DELIM = b"\r\n<EOM>\r\n" # End Of Message
 
 def recv_loop(sock):
     """
-    Handles receiving, framing, and decrypting all incoming messages.
+    Handles receiving and decrypting all incoming messages.
     This runs in a separate thread.
     """
     buffer = b""
@@ -33,95 +31,100 @@ def recv_loop(sock):
             buffer += data
 
             while DELIM in buffer:
-                # message is everything up to the first DELIM (DELIM not included)
+                # message is everything up to the first DELIM
                 message, buffer = buffer.split(DELIM, 1)
 
-                # --- PUBLIC KEY EXCHANGE ---
-                if message.startswith(b"-----BEGIN PUBLIC KEY-----"):
-                    if STATE.get("awaiting_key_response"):
+                # --- PUBLIC KEY EXCHANGE PROTOCOL ---
+                if message.startswith(b"-----BEGIN PUBLIC KEY-----"): #rsa public keys have this message at the start by default
+                    if STATE.get("awaiting_key_response"):  #if it is the  RSA protocol initiator who received response from responder
                         print("\n[+] Received peer's key response. Handshake complete.")
-                        STATE["peer_public_pem"] = message
-                        STATE["awaiting_key_response"] = False
-                        print("[*] New secure channel established.")
-                    else:
+                        STATE["peer_public_pem"] = message # store peer's public key
+                        STATE["awaiting_key_response"] = False # reset await flag 
+                        print("[+] New secure channel established.")
+                    else: #else it is the rsa protocol responder who received public key from the initiator
                         print("\n[+] Received new public key from peer. Resetting session.")
-                        STATE["peer_public_pem"] = message
+                        STATE["peer_public_pem"] = message #store public key of initiator
 
                         print("[+] Generating new key pair to respond...")
-                        key_info = create_rsa_key_pairs()
+                        key_info = create_rsa_key_pairs() #generate own public private key and send own public key back to initiator
                         STATE["self_private"] = key_info["private"]
                         STATE["self_public_pem"] = key_info["public_pem"]
 
                         sock.sendall(STATE["self_public_pem"] + DELIM)
-                        print("[*] Response sent. New secure channel established.")
+                        print("[+] Response sent. New secure channel established.")
 
-                # --- AES1:: incoming (first step of AES handshake) ---
+
+
+                # --- 1ST STEP OF SYMMETRIC KEY EXCHANGE PROTOCOL  ---
                 elif message.startswith(b"AES1::"):
-                    # Extract the RSA ciphertext portion (exact bytes meant for RSA)
+                    # Extract the RSA ciphertext portion by removing the header
                     c1 = message[len(b"AES1::"):]
 
-                    # Diagnostic: show ciphertext length vs expected RSA length (optional)
-                    if STATE.get("self_private"):
-                        expected_len = STATE["self_private"].key_size // 8
-                        # only show if length mismatches (helpful debugging)
-                        if len(c1) != expected_len:
-                            print(f"[!] Warning: AES1 ciphertext length {len(c1)} != expected RSA length {expected_len}")
+                    # # Diagnostic: show ciphertext length vs expected RSA length (optional)
+                    # if STATE.get("self_private"):
+                    #     expected_len = STATE["self_private"].key_size // 8
+                    #     # only show if length mismatches (helpful debugging)
+                    #     if len(c1) != expected_len:
+                    #         print(f"[!] Warning: AES1 ciphertext length {len(c1)} != expected RSA length {expected_len}")
 
-                    # If we were the initiator waiting for 1st handshake response
+                    # If it is the AES protocol initiator waiting for response from receiver 
                     if STATE.get("await_init"):
-                        # decrypt using our private key
+                        # decrypt using our rsa private key
                         payload = decrypt_rsa(c1, STATE["self_private"])
 
                         # Unpack nonce_self and nonce_peer
                         self_nonce, offset = unpack_len_prefixed(payload)
                         peer_nonce, _ = unpack_len_prefixed(payload, offset)
 
+                        #initator verifies its own sent nonce
                         if self_nonce != STATE["self_nonce"]:
                             raise ValueError("Nonce mismatch — Received message not fresh")
 
-                        print("[*] Message freshness verified by nonce match")
+                        print("[+] Message freshness verified by nonce match")
                         STATE["await_init"] = False
 
                         # create shared_key (Ks) and sign it
                         STATE["shared_key"] = create_aes_key()
                         signature = sign_message(STATE["self_private"], STATE["shared_key"])
 
-                        # Build payload: peer_nonce, Ks, signature
+                        # Build payload: peer_nonce, Ks, signature  i.e., N2||Ks||Sign(Ks)
                         out_payload = pack_len_prefixed(peer_nonce) + pack_len_prefixed(STATE["shared_key"]) + pack_len_prefixed(signature)
 
-                        # Use hybrid encrypt (AES-GCM envelope + RSA-encrypted AES key)
+                        # Use hybrid encryption using self public key (AES-GCM envelope + RSA-encrypted AES key) for payload 
                         c_out = hybrid_encrypt(out_payload, STATE["peer_public_pem"])
-                        sock.sendall(b"AES2::" + c_out + DELIM)
-                        print("[*] 1st Handshake complete.")
-                        print("[*] Sent E(PU_b, [N2 || Ks || E(PR_a, Ks)])")
-
+                        sock.sendall(b"AES2::" + c_out + DELIM) # add AES2 header to indicate that next is the 2nd step of the AES key protocol
+                        print("[+] 1st Handshake complete.")
+                        print("[+] Sent E(PU_b, [N2 || Ks || E(PR_a, Ks)])")
+                    
+                    # Else it is the Responder who received protocol message from initiator
                     else:
-                        # Responder behavior: unpack nonce and ID_A
+                        # decrypt message using own private key and unpack initiator nonce and ID_A
                         payload = decrypt_rsa(c1, STATE["self_private"])
                         peer_nonce, offset = unpack_len_prefixed(payload)
                         peer_id, _ = unpack_len_prefixed(payload, offset)
 
+                        #verify that it is actually the initiator and not some man-in-the-middle by using initator's ID
                         expected_id = fingerprint_of_pem(STATE["peer_public_pem"]).encode()
                         if peer_id != expected_id:
                             raise ValueError("Fingerprint mismatch — identity of AES initiator not verified")
 
-                        print("[*] Initiator identity verified by fingerprint:", peer_id.decode())
-                        STATE["shared_key"] = None
-                        STATE["await_send"] = True
+                        print("[+] Initiator identity verified by fingerprint:", peer_id.decode())
+                        STATE["shared_key"] = None # remove old shared key
+                        STATE["await_send"] = True # set flag to indicate that the responder is waiting for initator's 2nd step message of the protocol
 
-                        # Build our nonce N2 and send back: [N1 || N2] encrypted with peer's public key
+                        # Build responder's own nonce N2 and send back with initator's nonce: [N1 || N2] encrypted with initiator's public key
                         STATE["self_nonce"] = os.urandom(16)
                         out_payload = pack_len_prefixed(peer_nonce) + pack_len_prefixed(STATE["self_nonce"])
                         c_out = encrypt_rsa(out_payload, STATE["peer_public_pem"])
                         sock.sendall(b"AES1::" + c_out + DELIM)
-                        print("[*] Sent E(PU_a, [N1 || N2])")
+                        print("[+] Sent E(PU_a, [N1 || N2])")
 
-                # --- AES2:: incoming (second step: envelope contains Ks signed by A and encrypted for B) ---
+
+                # --- 2ND STEP OF SYMMETRIC KEY EXCHANGE PROTOCOL  ---
                 elif message.startswith(b"AES2::"):
-                    c2 = message[len(b"AES2::"):]
+                    c2 = message[len(b"AES2::"):] #remove AES2 header
 
-                    # If we initiated and are awaiting peer's 2nd handshake:
-                    if STATE.get("await_send"):
+                    if STATE.get("await_send"): # If responder got the 2nd step AES protocol message:
                         # hybrid_decrypt expects the hybrid blob (not the whole framed message)
                         payload = hybrid_decrypt(c2, STATE["self_private"])
 
@@ -130,40 +133,43 @@ def recv_loop(sock):
                         Ks, offset1 = unpack_len_prefixed(payload, offset)
                         Signature, _ = unpack_len_prefixed(payload, offset1)
 
+                        #receiver verifies its own sent nonce
                         if self_nonce != STATE["self_nonce"]:
                             raise ValueError("Nonce mismatch — Received message not fresh")
 
-                        print("[*] Message freshness verified by nonce match")
+                        print("[+] Message freshness verified by nonce match")
                         STATE["await_send"] = False
 
-                        # Verify signature (returns True/False or raise depending on your impl)
+                        # Verify signature (returns True/False or raise error depending)
                         val = verify_signature(STATE["peer_public_pem"], Ks, Signature)
                         if val:
                             STATE["shared_key"] = Ks
-                            print("[*] 2nd Handshake complete. Shared Key successfully exchanged.")
+                            print("[+] 2nd Handshake complete. Shared Key successfully exchanged.")
                         else:
                             raise ValueError("Signature on Ks failed verification")
-
+                        
                     else:
-                        # If not awaiting, we might be a responder receiving an unexpected AES2
-                        print("[!] Unexpected AES2 message received while not awaiting handshake.")
-                        # you may choose to ignore or log it.
+                        # If not awaiting, we might be a responder receiving an unexpected AES2 message
+                        print("[!] Unexpected message received. AES protocol failed.")
 
-                # --- Plaintext passthrough ---
-                elif message.startswith(b"PLAINTEXT::"):
-                    plaintext = message.split(b"::", 1)[1]
-                    peer_addr = sock.getpeername()[0]
-                    print(f"\r{peer_addr} (plaintext) > {plaintext.decode()}")
-
-                # --- Generic encrypted message: try RSA decrypt if we have private key ---
+                # --- NOT A RSA OR AES PROTOCOL MESSAGE. INSTEAD ACTUAL ENCRYPTED/UNENCRYPTED TEXT MESSAGE ---
                 else:
-                    if STATE["self_private"] and STATE["shared_key"]==None:
+                    # --- RECEIVING PLAINTEXT ---
+                    if message.startswith(b"PLAINTEXT::"): 
+                        plaintext = message.split(b"::", 1)[1]
+                        peer_addr = sock.getpeername()[0]
+                        print(f"\r{peer_addr} (plaintext) > {plaintext.decode()}")
+
+                    # --- RECEIVING RSA ENCRYPTED TEXT ---
+                    elif STATE["self_private"] and STATE["shared_key"]==None:
                         try:
                             plaintext = decrypt_rsa(message, STATE["self_private"])
                             peer_addr = sock.getpeername()[0]
                             print(f"\r{peer_addr} (encrypted with RSA) > {plaintext.decode()}")
                         except Exception:
                             print("\n[!] Failed to decrypt rsa message. It may be corrupted or not encrypted.")
+
+                    # --- RECEIVING AES ENCRYPTED TEXT ---
                     elif STATE["shared_key"]:
                         try:
                             plaintext = decrypt_aes(message, STATE["shared_key"])
@@ -179,6 +185,7 @@ def recv_loop(sock):
         except ConnectionResetError:
             break
 
+            
     print("\n[!] Peer has closed the connection.")
     os._exit(1)
 
@@ -192,7 +199,8 @@ def chat(sock):
     threading.Thread(target=recv_loop, args=(sock,), daemon=True).start()
     
     print("--- Chat Initialized ---")
-    print("Type '/rsa' to initiate or reset a secure key exchange.")
+    print("Type '/rsa' to initiate or reset a public-private RSA key pair exchange.")
+    print("Type '/aes' to initiate or reset a secure shared AES 256 key exchange.")
     print("Type 'quit' to exit.")
     print("---------------------------------")
 
@@ -206,33 +214,32 @@ def chat(sock):
                 sock.close()
                 os._exit(0)
             
-            # Command to initiate or reset key exchange
+            # Command to initiate or reset RSA public key exchange
             elif line.lower() == r"/rsa":
-                print("[*] Initiating key exchange...")
-                # Set a flag indicating we are waiting for the peer's key to complete the handshake.
-                STATE["awaiting_key_response"] = True
-                # Clear the old peer key to prevent sending messages until the new one arrives.
-                STATE["peer_public_pem"] = None 
+                print("[*] Initiating key exchange...") 
+                STATE["awaiting_key_response"] = True # Set a flag indicating we are waiting for the peer's key to complete the handshake.
+                STATE["peer_public_pem"] = None # Clear the old peer key to prevent sending messages until the new one arrives.
                 
-                key_info = create_rsa_key_pairs()
+                key_info = create_rsa_key_pairs() #generate own public private key paris
                 STATE["self_private"] = key_info["private"]
                 STATE["self_public_pem"] = key_info["public_pem"]
                 
+                #send the own public key to peer
                 sock.sendall(STATE["self_public_pem"] + DELIM)
                 print("[+] Your public key sent. Waiting for peer's response...")
 
-            # Command to initiate or reset shared key exchange
+            # Command to initiate or reset AES shared key exchange
             elif line.lower() == r"/aes":
                 if STATE["peer_public_pem"] and STATE["self_private"]:
                     print("[*] Initiating key exchange...")
-                    # Set a flag indicating we are waiting for the peer to complete the 1st AES handshake.
-                    STATE["await_init"] = True
-                    # Clear the old AES key to prevent sending messages until the new one arrives.
-                    STATE["shared_key"] = None 
+                    STATE["await_init"] = True  # Set a flag indicating we are waiting for the peer to complete the 1st AES handshake.
+                    STATE["shared_key"] = None # Clear the old AES key to prevent sending messages until the new one arrives.
                     
                     # Build Nonce and identifier (fingerprint)
                     STATE["self_nonce"] = os.urandom(16)
-                    ID_A = fingerprint_of_pem(STATE["self_public_pem"]).encode()  # fingerprint as bytes
+                    ID_A = fingerprint_of_pem(STATE["self_public_pem"]).encode()  
+
+                    #send rsa encrypted nonce and ID with a header indicating that this is 1st part of AES protocol
                     payload = pack_len_prefixed(STATE["self_nonce"]) + pack_len_prefixed(ID_A)
                     c1 = encrypt_rsa(payload, STATE["peer_public_pem"])
                     sock.sendall(b"AES1::" + c1 + DELIM)
@@ -240,7 +247,7 @@ def chat(sock):
                 else:
                     print("[!] AES-256 key exchange failed. Generate RSA key pairs using /rsa first.")
 
-            # --- AES ENCRYPTION / PLAINTEXT STEP ---
+            # --- SEND TEXT STEP IF AES KEY EXISTS ---
             elif STATE["shared_key"]:
                 try:
                     ciphertext = encrypt_aes(line, STATE["shared_key"])
@@ -248,13 +255,15 @@ def chat(sock):
                 except Exception as e:
                     print(f"[!] Encryption failed: {e}")
 
-            # --- RSA ENCRYPTION / PLAINTEXT STEP ---
+            # --- SEND TEXT STEP IF ONLY RSA KEY EXISTS BUT AES KEY DOES NOT ---
             elif STATE["peer_public_pem"] and STATE["self_private"] and STATE["shared_key"]==None:
                 try:
                     ciphertext = encrypt_rsa(line.encode(), STATE["peer_public_pem"])
                     sock.sendall(ciphertext + DELIM)
                 except Exception as e:
                     print(f"[!] Encryption failed: {e}")
+
+            # --- SEND TEXT STEP IF NEITHER RSA KEY NOR AES KEY EXISTS. Header provided to indicate that this is a plaintext ---
             else:
                 print("[!] No encryption. Sending as plaintext.")
                 sock.sendall(b"PLAINTEXT::" + line.encode() + DELIM)
@@ -266,7 +275,7 @@ def chat(sock):
 
 
 def main():
-    """Parses arguments and starts the chat in either listen or connect mode."""
+    """start chat in either listen or connect mode"""
     ap = argparse.ArgumentParser(description="A simple two-peer encrypted chat application")
     grp = ap.add_mutually_exclusive_group(required=True)
     grp.add_argument("--listen",  type=int, metavar="PORT", help="Listen for an incoming connection on PORT")
@@ -293,7 +302,7 @@ def main():
             
         try:
             with socket.create_connection((host, port)) as s:
-                print(f"[*] Connected to {host}:{port}")
+                print(f"[+] Connected to {host}:{port}")
                 chat(s)
         except OSError as e:
             print(f"[!] Connection failed: {e}")
